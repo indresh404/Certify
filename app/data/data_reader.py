@@ -101,6 +101,7 @@ def extract_names(
     for row in rows:
         name = row.get(column_name, "").strip()
         if name:
+            name = name.title()
             if name in seen:
                 duplicates += 1
             seen.add(name)
