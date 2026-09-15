@@ -1,11 +1,11 @@
-from typing import Tuple
 from PIL import ImageDraw, ImageFont
+
 
 def measure_text(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont,
-) -> Tuple[int, int, int, int]:
+) -> tuple[int, int, int, int]:
     """
     Measure text bounding box accurately.
     Returns (left, top, right, bottom).
@@ -14,15 +14,15 @@ def measure_text(
 
 
 def calculate_text_position(
-    text_bbox: Tuple[int, int, int, int],
+    text_bbox: tuple[int, int, int, int],
     text_x: float,
     text_y: float,
     alignment: str,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """
     Calculate the (x, y) starting coordinate for ImageDraw.text based on
     the stored text_x/text_y (which acts as the anchor) and the requested alignment.
-    
+
     text_bbox is (left, top, right, bottom).
     text_x, text_y is the anchor position.
     """
@@ -33,10 +33,10 @@ def calculate_text_position(
     # The anchor Y is considered the vertical center of the text bounding box.
     # We want to find the top-left coordinate to pass to `draw.text()`.
     # Pillow's draw.text with anchor="lt" (default) requires the top-left coordinate.
-    
+
     # Calculate top-left Y
     draw_y = text_y - (height / 2.0) - top
-    
+
     if alignment == "center":
         draw_x = text_x - (width / 2.0) - left
     elif alignment == "left":
@@ -46,8 +46,9 @@ def calculate_text_position(
     else:
         # Default to center if unknown
         draw_x = text_x - (width / 2.0) - left
-        
+
     return draw_x, draw_y
+
 
 def auto_fit_font_size(
     draw: ImageDraw.ImageDraw,
@@ -69,6 +70,6 @@ def auto_fit_font_size(
             if width <= max_width:
                 return size
             size -= 1
-        except Exception:
+        except Exception:  # noqa: BLE001
             break
     return size
