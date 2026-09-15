@@ -117,7 +117,7 @@ class GeneratorThread(Thread):
                         name,
                         font=font,
                         fill=self.state.text_color,
-                        anchor=anchor
+                        anchor=anchor,
                     )
 
                     # 5. Determine unique filename
