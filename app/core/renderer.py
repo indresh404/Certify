@@ -1,53 +1,30 @@
-from PIL import ImageDraw, ImageFont
+﻿from PIL import ImageDraw, ImageFont
 
 
-def measure_text(
+def get_text_anchor(alignment: str) -> str:
+    if alignment == "center":
+        return "mm"
+    elif alignment == "left":
+        return "lm"
+    elif alignment == "right":
+        return "rm"
+    return "mm"
+
+
+def measure_text_anchored(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont,
+    x: float,
+    y: float,
+    alignment: str,
 ) -> tuple[int, int, int, int]:
     """
-    Measure text bounding box accurately.
+    Measure text bounding box accurately using Pillow's anchor system.
     Returns (left, top, right, bottom).
     """
-    return draw.textbbox((0, 0), text, font=font)
-
-
-def calculate_text_position(
-    text_bbox: tuple[int, int, int, int],
-    text_x: float,
-    text_y: float,
-    alignment: str,
-) -> tuple[float, float]:
-    """
-    Calculate the (x, y) starting coordinate for ImageDraw.text based on
-    the stored text_x/text_y (which acts as the anchor) and the requested alignment.
-
-    text_bbox is (left, top, right, bottom).
-    text_x, text_y is the anchor position.
-    """
-    left, top, right, bottom = text_bbox
-    width = right - left
-    height = bottom - top
-
-    # The anchor Y is considered the vertical center of the text bounding box.
-    # We want to find the top-left coordinate to pass to `draw.text()`.
-    # Pillow's draw.text with anchor="lt" (default) requires the top-left coordinate.
-
-    # Calculate top-left Y
-    draw_y = text_y - (height / 2.0) - top
-
-    if alignment == "center":
-        draw_x = text_x - (width / 2.0) - left
-    elif alignment == "left":
-        draw_x = text_x - left
-    elif alignment == "right":
-        draw_x = text_x - width - left
-    else:
-        # Default to center if unknown
-        draw_x = text_x - (width / 2.0) - left
-
-    return draw_x, draw_y
+    anchor = get_text_anchor(alignment)
+    return draw.textbbox((x, y), text, font=font, anchor=anchor)
 
 
 def auto_fit_font_size(
@@ -65,7 +42,7 @@ def auto_fit_font_size(
     while size > min_size:
         try:
             font = ImageFont.truetype(font_path, size)
-            bbox = measure_text(draw, text, font)
+            bbox = draw.textbbox((0, 0), text, font=font, anchor="la")
             width = bbox[2] - bbox[0]
             if width <= max_width:
                 return size

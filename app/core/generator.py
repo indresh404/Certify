@@ -5,7 +5,7 @@ from threading import Event, Thread
 
 from PIL import Image, ImageDraw, ImageFont
 
-from app.core.renderer import auto_fit_font_size, calculate_text_position, measure_text
+from app.core.renderer import auto_fit_font_size, get_text_anchor
 from app.core.state import AppState
 
 
@@ -109,14 +109,15 @@ class GeneratorThread(Thread):
                         if font_path
                         else ImageFont.load_default()
                     )
-                    bbox = measure_text(draw, name, font)
-                    draw_x, draw_y = calculate_text_position(
-                        bbox, self.state.text_x, self.state.text_y, self.state.alignment
-                    )
+                    anchor = get_text_anchor(self.state.alignment)
 
                     # 4. Draw text
                     draw.text(
-                        (draw_x, draw_y), name, font=font, fill=self.state.text_color
+                        (self.state.text_x, self.state.text_y),
+                        name,
+                        font=font,
+                        fill=self.state.text_color,
+                        anchor=anchor
                     )
 
                     # 5. Determine unique filename

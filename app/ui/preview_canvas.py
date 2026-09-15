@@ -2,7 +2,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from app.core.coordinates import original_to_preview, preview_to_original
-from app.core.renderer import auto_fit_font_size, calculate_text_position, measure_text
+from app.core.renderer import auto_fit_font_size, get_text_anchor, measure_text_anchored
 from app.core.state import AppState
 
 
@@ -118,8 +118,8 @@ class PreviewCanvas(ctk.CTkCanvas):
         # We calculate the position and font size
 
         # delete old text overlay
-        if self.text_id:
-            self.delete(self.text_id)
+        if getattr(self, "text_item", None):
+            self.delete(self.text_item)
         if self.bbox_id:
             self.delete(self.bbox_id)
         if self.h_guide:
@@ -135,7 +135,7 @@ class PreviewCanvas(ctk.CTkCanvas):
             return
 
         scale = self.state.preview_scale
-        offset = self.state.preview_offset
+        offset_x, offset_y = self.state.preview_offset
 
         # Calculate final size (simulating auto-fit if necessary)
         final_size = self.state.font_size
@@ -155,74 +155,80 @@ class PreviewCanvas(ctk.CTkCanvas):
             except Exception:  # noqa: BLE001, S110
                 pass
 
-        # Convert original coordinates to preview coordinates
-        px, py = original_to_preview(
-            self.state.text_x, self.state.text_y, scale, offset
-        )
-
-        # Set up font for tkinter
-        # Tkinter font loading from path is notoriously hard cross-platform.
-        # For the live preview, we use a generic approximation if path is not supported by tk
-        # However, custom fonts are requested. We can draw the text onto a transparent PIL image
-        # and display it on the canvas for 100% fidelity.
-
-        # Render text via PIL for perfect accuracy
         try:
             font = (
-                ImageFont.truetype(font_path, int(final_size * scale))
+                ImageFont.truetype(font_path, int(final_size))
                 if font_path
                 else ImageFont.load_default()
             )
             dummy_img = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
             draw = ImageDraw.Draw(dummy_img)
-            bbox = measure_text(draw, preview_name, font)
 
-            w = bbox[2] - bbox[0]
-            h = bbox[3] - bbox[1]
-
-            # The "px, py" anchor is the original-space text_x, text_y scaled.
-            # calculate_text_position gives us the top-left of the text in original space
-            # Let's do calculation in original space then scale, or scale then calculate.
-            # It's better to scale the dimensions.
-
-            draw_ox, draw_oy = calculate_text_position(
-                (bbox[0] / scale, bbox[1] / scale, bbox[2] / scale, bbox[3] / scale),
+            # Calculate position using anchored text
+            bbox = measure_text_anchored(
+                draw,
+                preview_name,
+                font,
                 self.state.text_x,
                 self.state.text_y,
                 self.state.alignment,
             )
 
-            # Now convert draw_ox, draw_oy to preview coords
-            draw_px, draw_py = original_to_preview(draw_ox, draw_oy, scale, offset)
-
-            # Create a transparent image for the text
-            text_img = Image.new("RGBA", (int(w) + 10, int(h) + 10), (255, 255, 255, 0))
-            text_draw = ImageDraw.Draw(text_img)
-            # Offset slightly to handle padding
-            text_draw.text(
-                (-bbox[0] + 5, -bbox[1] + 5),
-                preview_name,
-                font=font,
-                fill=self.state.text_color,
+            # Convert bbox to preview coordinates
+            left, top, right, bottom = bbox
+            px_left, py_top = original_to_preview(
+                left, top, scale, (offset_x, offset_y)
+            )
+            px_right, py_bottom = original_to_preview(
+                right, bottom, scale, (offset_x, offset_y)
             )
 
-            self.tk_text_img = ImageTk.PhotoImage(text_img)
-            self.text_id = self.create_image(
-                draw_px - 5, draw_py - 5, anchor="nw", image=self.tk_text_img
-            )
+            p_width = max(1, int(px_right - px_left))
+            p_height = max(1, int(py_bottom - py_top))
 
-            # Draw bounding box
-            self.bbox_id = self.create_rectangle(
-                draw_px, draw_py, draw_px + w, draw_py + h, dash=(4, 4), outline="blue"
-            )
+            if p_width > 0 and p_height > 0:
+                txt_overlay = Image.new("RGBA", (p_width, p_height), (255, 255, 255, 0))
+                overlay_draw = ImageDraw.Draw(txt_overlay)
 
-            # Guide lines (only when dragging)
-            if self.is_dragging:
-                canvas_center_x = self.winfo_width() / 2
-                canvas_center_y = self.winfo_height() / 2
+                # Convert anchor coordinate to preview space
+                px, py = original_to_preview(
+                    self.state.text_x, self.state.text_y, scale, (offset_x, offset_y)
+                )
+                anchor = get_text_anchor(self.state.alignment)
 
-                # Check if close to center
-                if abs(px - canvas_center_x) < 10:
+                # Draw text onto overlay
+                preview_font = ImageFont.truetype(font_path, int(final_size * scale))
+                overlay_draw.text(
+                    (px - px_left, py - py_top),
+                    preview_name,
+                    font=preview_font,
+                    fill=self.state.text_color,
+                    anchor=anchor,
+                )
+
+                self.photo_text_image = ImageTk.PhotoImage(txt_overlay)
+                self.text_item = self.create_image(
+                    px_left, py_top, anchor="nw", image=self.photo_text_image
+                )
+
+                if self.is_dragging:
+                    # Draw dotted bounding box
+                    self.bbox_id = self.create_rectangle(
+                        px_left,
+                        py_top,
+                        px_right,
+                        py_bottom,
+                        dash=(4, 4),
+                        outline="blue",
+                    )
+
+                    canvas_center_x, canvas_center_y = original_to_preview(
+                        self.state.template_width / 2,
+                        self.state.template_height / 2,
+                        scale,
+                        (offset_x, offset_y),
+                    )
+
                     self.v_guide = self.create_line(
                         canvas_center_x,
                         0,
@@ -231,7 +237,6 @@ class PreviewCanvas(ctk.CTkCanvas):
                         fill="red",
                         dash=(2, 2),
                     )
-                if abs(py - canvas_center_y) < 10:
                     self.h_guide = self.create_line(
                         0,
                         canvas_center_y,
