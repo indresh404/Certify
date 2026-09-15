@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.class
+build/
+dist/
+*.spec
+.pytest_cache/
+.venv/
+venv/
+ENV/
+*.log
