@@ -1,16 +1,26 @@
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from app.core.coordinates import original_to_preview, preview_to_original
+from app.core.coordinates import original_to_preview
 from app.core.renderer import auto_fit_font_size, get_text_anchor, measure_text_anchored
 from app.core.state import AppState
 
 
 class PreviewCanvas(ctk.CTkCanvas):
-    def __init__(self, master, state: AppState, on_change_callback, **kwargs):
+    def __init__(
+        self,
+        master,
+        state: AppState,
+        on_change_callback,
+        on_field_selected_callback=None,
+        on_drag_callback=None,
+        **kwargs,
+    ):
         super().__init__(master, **kwargs)
         self.state = state
         self.on_change = on_change_callback
+        self.on_field_selected = on_field_selected_callback
+        self.on_drag_callback = on_drag_callback
 
         self.bind("<Configure>", self.on_resize)
 
@@ -23,10 +33,12 @@ class PreviewCanvas(ctk.CTkCanvas):
 
         self.photo_image = None
         self.bg_image_id = None
-        self.text_id = None
-        self.bbox_id = None
-        self.h_guide = None
-        self.v_guide = None
+
+        self.text_overlay_items = []
+        self.photo_text_images = []
+        self.bbox_items = []
+        self.guide_items = []
+        self.field_bounds = []
 
         self.is_dragging = False
         self.drag_start_x = 0
@@ -88,6 +100,10 @@ class PreviewCanvas(ctk.CTkCanvas):
             self.fit_to_canvas()
 
         self.delete("all")
+        self.text_overlay_items.clear()
+        self.photo_text_images.clear()
+        self.bbox_items.clear()
+        self.guide_items.clear()
 
         scale = self.state.preview_scale
         offset_x, offset_y = self.state.preview_offset
@@ -114,192 +130,271 @@ class PreviewCanvas(ctk.CTkCanvas):
         self.draw_text_overlay()
 
     def draw_text_overlay(self):
-        # We draw text using tkinter canvas so it's live/vector-like
-        # We calculate the position and font size
+        # Delete old overlay elements
+        for item_id in self.text_overlay_items:
+            self.delete(item_id)
+        self.text_overlay_items.clear()
+        self.photo_text_images.clear()
 
-        # delete old text overlay
-        if getattr(self, "text_item", None):
-            self.delete(self.text_item)
-        if self.bbox_id:
-            self.delete(self.bbox_id)
-        if self.h_guide:
-            self.delete(self.h_guide)
-        if self.v_guide:
-            self.delete(self.v_guide)
+        for item_id in self.bbox_items:
+            self.delete(item_id)
+        self.bbox_items.clear()
 
-        preview_name = "Sample Name"
-        if self.state.names:
-            preview_name = self.state.names[0]
+        for item_id in self.guide_items:
+            self.delete(item_id)
+        self.guide_items.clear()
 
-        if not preview_name:
+        self.field_bounds.clear()
+
+        if not self.state.template_path or not self.state.fields:
             return
 
         scale = self.state.preview_scale
         offset_x, offset_y = self.state.preview_offset
 
-        # Calculate final size (simulating auto-fit if necessary)
-        final_size = self.state.font_size
-        font_path = str(self.state.font_path) if self.state.font_path else ""
+        # Draw each enabled field
+        for idx, field_cfg in enumerate(self.state.fields):
+            if not field_cfg.enabled:
+                continue
 
-        safe_margin_px = self.state.template_width * self.state.safe_margin_pct
-        max_width = self.state.template_width - (2 * safe_margin_px)
+            # Determine sample text to preview
+            sample_text = ""
+            if self.state.raw_data:
+                sample_text = str(
+                    self.state.raw_data[0].get(field_cfg.column_name, "")
+                ).strip()
+            if not sample_text:
+                sample_text = f"Sample {field_cfg.column_name}"
 
-        if self.state.auto_fit and font_path:
-            try:
-                # We need a dummy image draw to measure
-                dummy_img = Image.new("RGB", (1, 1))
-                draw = ImageDraw.Draw(dummy_img)
-                final_size = auto_fit_font_size(
-                    draw, preview_name, font_path, self.state.font_size, max_width
-                )
-            except Exception:  # noqa: BLE001, S110
-                pass
+            # Auto-fit calculation
+            final_size = field_cfg.font_size
+            font_path = str(field_cfg.font_path) if field_cfg.font_path else ""
 
-        try:
-            font = (
-                ImageFont.truetype(font_path, int(final_size))
-                if font_path
-                else ImageFont.load_default()
-            )
-            dummy_img = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
-            draw = ImageDraw.Draw(dummy_img)
-
-            # Calculate position using anchored text
-            bbox = measure_text_anchored(
-                draw,
-                preview_name,
-                font,
-                self.state.text_x,
-                self.state.text_y,
-                self.state.alignment,
-            )
-
-            # Convert bbox to preview coordinates
-            left, top, right, bottom = bbox
-            px_left, py_top = original_to_preview(
-                left, top, scale, (offset_x, offset_y)
-            )
-            px_right, py_bottom = original_to_preview(
-                right, bottom, scale, (offset_x, offset_y)
-            )
-
-            p_width = max(1, int(px_right - px_left))
-            p_height = max(1, int(py_bottom - py_top))
-
-            if p_width > 0 and p_height > 0:
-                txt_overlay = Image.new("RGBA", (p_width, p_height), (255, 255, 255, 0))
-                overlay_draw = ImageDraw.Draw(txt_overlay)
-
-                # Convert anchor coordinate to preview space
-                px, py = original_to_preview(
-                    self.state.text_x, self.state.text_y, scale, (offset_x, offset_y)
-                )
-                anchor = get_text_anchor(self.state.alignment)
-
-                # Draw text onto overlay
-                preview_font = ImageFont.truetype(font_path, int(final_size * scale))
-                overlay_draw.text(
-                    (px - px_left, py - py_top),
-                    preview_name,
-                    font=preview_font,
-                    fill=self.state.text_color,
-                    anchor=anchor,
-                )
-
-                self.photo_text_image = ImageTk.PhotoImage(txt_overlay)
-                self.text_item = self.create_image(
-                    px_left, py_top, anchor="nw", image=self.photo_text_image
-                )
-
-                if self.is_dragging:
-                    # Draw dotted bounding box
-                    self.bbox_id = self.create_rectangle(
-                        px_left,
-                        py_top,
-                        px_right,
-                        py_bottom,
-                        dash=(4, 4),
-                        outline="blue",
+            if field_cfg.auto_fit and font_path:
+                try:
+                    safe_margin_px = (
+                        self.state.template_width * field_cfg.safe_margin_pct
                     )
+                    max_width = self.state.template_width - (2 * safe_margin_px)
+                    dummy_img = Image.new("RGB", (1, 1))
+                    draw = ImageDraw.Draw(dummy_img)
+                    final_size = auto_fit_font_size(
+                        draw, sample_text, font_path, field_cfg.font_size, max_width
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    pass
 
-                    canvas_center_x, canvas_center_y = original_to_preview(
-                        self.state.template_width / 2,
-                        self.state.template_height / 2,
+            try:
+                font = (
+                    ImageFont.truetype(font_path, int(final_size))
+                    if font_path
+                    else ImageFont.load_default()
+                )
+                dummy_img = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
+                draw = ImageDraw.Draw(dummy_img)
+
+                # Measure bounding box in original template coordinates
+                bbox = measure_text_anchored(
+                    draw,
+                    sample_text,
+                    font,
+                    field_cfg.text_x,
+                    field_cfg.text_y,
+                    field_cfg.alignment,
+                )
+
+                left, top, right, bottom = bbox
+                px_left, py_top = original_to_preview(
+                    left, top, scale, (offset_x, offset_y)
+                )
+                px_right, py_bottom = original_to_preview(
+                    right, bottom, scale, (offset_x, offset_y)
+                )
+
+                self.field_bounds.append(
+                    {
+                        "index": idx,
+                        "field": field_cfg,
+                        "bounds": (px_left, py_top, px_right, py_bottom),
+                    }
+                )
+
+                p_width = max(1, int(px_right - px_left) + 4)
+                p_height = max(1, int(py_bottom - py_top) + 4)
+
+                if p_width > 0 and p_height > 0:
+                    txt_overlay = Image.new(
+                        "RGBA", (p_width, p_height), (255, 255, 255, 0)
+                    )
+                    overlay_draw = ImageDraw.Draw(txt_overlay)
+
+                    px, py = original_to_preview(
+                        field_cfg.text_x,
+                        field_cfg.text_y,
                         scale,
                         (offset_x, offset_y),
                     )
-
-                    self.v_guide = self.create_line(
-                        canvas_center_x,
-                        0,
-                        canvas_center_x,
-                        self.winfo_height(),
-                        fill="red",
-                        dash=(2, 2),
-                    )
-                    self.h_guide = self.create_line(
-                        0,
-                        canvas_center_y,
-                        self.winfo_width(),
-                        canvas_center_y,
-                        fill="red",
-                        dash=(2, 2),
+                    anchor = get_text_anchor(field_cfg.alignment)
+                    scaled_size = max(1, int(final_size * scale))
+                    preview_font = (
+                        ImageFont.truetype(font_path, scaled_size)
+                        if font_path
+                        else ImageFont.load_default()
                     )
 
-        except Exception as e:  # noqa: BLE001
-            print(f"Error drawing text preview: {e}")
+                    overlay_draw.text(
+                        (px - px_left, py - py_top),
+                        sample_text,
+                        font=preview_font,
+                        fill=field_cfg.text_color,
+                        anchor=anchor,
+                    )
+
+                    photo_img = ImageTk.PhotoImage(txt_overlay)
+                    self.photo_text_images.append(photo_img)
+                    item_id = self.create_image(
+                        px_left, py_top, anchor="nw", image=photo_img
+                    )
+                    self.text_overlay_items.append(item_id)
+
+                    # If this is the active field, draw selection boundary and badge
+                    if idx == self.state.active_field_index:
+                        b_id = self.create_rectangle(
+                            px_left - 3,
+                            py_top - 3,
+                            px_right + 3,
+                            py_bottom + 3,
+                            dash=(4, 4),
+                            outline="#3B82F6",
+                            width=2,
+                        )
+                        self.bbox_items.append(b_id)
+
+                        tag_id = self.create_text(
+                            px_left - 3,
+                            py_top - 6,
+                            text=f"• {field_cfg.column_name}",
+                            fill="#3B82F6",
+                            font=("Arial", 10, "bold"),
+                            anchor="sw",
+                        )
+                        self.bbox_items.append(tag_id)
+
+                        if self.is_dragging:
+                            # Center alignment guides
+                            canvas_center_x, canvas_center_y = original_to_preview(
+                                self.state.template_width / 2,
+                                self.state.template_height / 2,
+                                scale,
+                                (offset_x, offset_y),
+                            )
+
+                            v_guide = self.create_line(
+                                canvas_center_x,
+                                0,
+                                canvas_center_x,
+                                self.winfo_height(),
+                                fill="#EF4444",
+                                dash=(2, 2),
+                            )
+                            h_guide = self.create_line(
+                                0,
+                                canvas_center_y,
+                                self.winfo_width(),
+                                canvas_center_y,
+                                fill="#EF4444",
+                                dash=(2, 2),
+                            )
+                            self.guide_items.extend([v_guide, h_guide])
+
+            except Exception as e:  # noqa: BLE001
+                print(f"Error drawing text preview for {field_cfg.column_name}: {e}")
 
     def on_press(self, event):
-        if not self.state.template_path:
+        if not self.state.template_path or not self.state.fields:
             return
-        self.is_dragging = True
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-        self.start_text_x = self.state.text_x
-        self.start_text_y = self.state.text_y
+
+        scale = self.state.preview_scale
+        if scale <= 0:
+            return
+
+        # Hit-test bounding boxes (check from topmost to bottommost)
+        hit_index = None
+        for item in reversed(self.field_bounds):
+            px_left, py_top, px_right, py_bottom = item["bounds"]
+            if (px_left - 8 <= event.x <= px_right + 8) and (
+                py_top - 8 <= event.y <= py_bottom + 8
+            ):
+                hit_index = item["index"]
+                break
+
+        if hit_index is not None:
+            self.state.active_field_index = hit_index
+            if self.on_field_selected:
+                self.on_field_selected(hit_index)
+
+        active = self.state.active_field
+        if active is not None:
+            self.is_dragging = True
+            self.drag_start_x = event.x
+            self.drag_start_y = event.y
+            self.start_text_x = active.text_x
+            self.start_text_y = active.text_y
+            self.draw_text_overlay()
 
     def on_drag(self, event):
         if not self.is_dragging:
             return
 
+        active = self.state.active_field
+        if active is None:
+            return
+
+        scale = self.state.preview_scale
+        if scale <= 0:
+            return
+
         dx = event.x - self.drag_start_x
         dy = event.y - self.drag_start_y
-
-        # Convert delta to original space
-        scale = self.state.preview_scale
-        if scale == 0:
-            return
 
         ox_delta = dx / scale
         oy_delta = dy / scale
 
-        # Update state
-        self.state.text_x = self.start_text_x + ox_delta
-        self.state.text_y = self.start_text_y + oy_delta
+        new_x = self.start_text_x + ox_delta
+        new_y = self.start_text_y + oy_delta
 
-        # Clamp to canvas
-        px, py = original_to_preview(
-            self.state.text_x, self.state.text_y, scale, self.state.preview_offset
-        )
+        # Snapping thresholds
+        snap_threshold_orig = 12.0 / scale
 
-        canvas_center_x = self.winfo_width() / 2
-        canvas_center_y = self.winfo_height() / 2
+        # Snap to template center X / Y
+        template_cx = self.state.template_width / 2
+        template_cy = self.state.template_height / 2
 
-        # Snapping logic
-        if abs(px - canvas_center_x) < 10:
-            px = canvas_center_x
-        if abs(py - canvas_center_y) < 10:
-            py = canvas_center_y
+        if abs(new_x - template_cx) < snap_threshold_orig:
+            new_x = template_cx
+        if abs(new_y - template_cy) < snap_threshold_orig:
+            new_y = template_cy
 
-        # Write back snapped coordinates
-        self.state.text_x, self.state.text_y = preview_to_original(
-            px, py, scale, self.state.preview_offset
-        )
+        # Snap to other enabled fields' X and Y
+        for f in self.state.fields:
+            if f.enabled and f is not active:
+                if abs(new_x - f.text_x) < snap_threshold_orig:
+                    new_x = f.text_x
+                if abs(new_y - f.text_y) < snap_threshold_orig:
+                    new_y = f.text_y
+
+        active.text_x = new_x
+        active.text_y = new_y
 
         self.draw_text_overlay()
+
+        if self.on_drag_callback:
+            self.on_drag_callback()
 
     def on_release(self, event):
-        self.is_dragging = False
-        self.draw_text_overlay()
-        if self.on_change:
-            self.on_change()
+        if self.is_dragging:
+            self.is_dragging = False
+            self.draw_text_overlay()
+            if self.on_change:
+                self.on_change()
+

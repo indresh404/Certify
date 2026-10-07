@@ -9,8 +9,8 @@ import customtkinter as ctk
 from PIL import Image, ImageSequence, ImageTk
 
 from app.core.generator import GeneratorThread
-from app.core.state import AppState
-from app.data.data_reader import DataError, extract_names, load_data
+from app.core.state import AppState, FieldConfig
+from app.data.data_reader import DataError, load_data
 from app.ui.preview_canvas import PreviewCanvas
 from app.ui.progress_dialog import CompletionDialog
 from app.ui.settings_panel import SettingsPanel, resource_path
@@ -36,7 +36,7 @@ class MainWindow(ctk.CTk):
             state=self.app_state,
             on_change_callback=self.refresh_preview,
             on_action_callback=self.handle_action,
-            width=300,
+            width=320,
         )
         self.settings_panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
@@ -81,6 +81,8 @@ class MainWindow(ctk.CTk):
             self.preview_tab,
             state=self.app_state,
             on_change_callback=self.refresh_preview,
+            on_field_selected_callback=self.on_canvas_field_selected,
+            on_drag_callback=self.on_canvas_drag,
             bg="gray15",
         )
         self.canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -139,6 +141,12 @@ class MainWindow(ctk.CTk):
         self.generator_thread = None
         self.cancel_event = None
 
+    def on_canvas_field_selected(self, index: int):
+        self.settings_panel.sync_controls_from_active_field()
+
+    def on_canvas_drag(self):
+        self.settings_panel.update_coords_from_state()
+
     def setup_about_tab(self):
         profile_path = resource_path("assets/image/profile.jpeg")
         if profile_path.exists():
@@ -176,9 +184,8 @@ class MainWindow(ctk.CTk):
 
         for frame in ImageSequence.Iterator(img):
             self.gif_frames.append(ImageTk.PhotoImage(frame.copy().convert("RGBA")))
-            # Get duration, default to 40ms if not present
             duration = frame.info.get("duration", 40)
-            if duration < 10:  # Some GIFs report 0 or very low
+            if duration < 10:
                 duration = 40
             self.gif_durations.append(duration)
 
@@ -201,21 +208,27 @@ class MainWindow(ctk.CTk):
             self.load_template(Path(data))
         elif action == "load_csv":
             self.load_csv(Path(data))
-        elif action == "column_changed":
-            self.update_names_from_column()
         elif action == "reset_pos":
-            self.app_state.text_x = self.app_state.template_width / 2
-            self.app_state.text_y = self.app_state.template_height / 2
-            self.refresh_preview()
+            active = self.app_state.active_field
+            if active and self.app_state.template_width > 0:
+                active.text_x = self.app_state.template_width / 2.0
+                active.text_y = self.app_state.template_height / 2.0
+                self.settings_panel.update_coords_from_state()
+                self.refresh_preview()
         elif action == "reset_all":
-            # Reset settings logic
-            self.app_state.font_size = 48
-            self.app_state.text_color = "#000000"
-            self.app_state.alignment = "center"
-            self.app_state.text_x = self.app_state.template_width / 2
-            self.app_state.text_y = self.app_state.template_height / 2
-            self.settings_panel.size_var.set("48")
-            self.settings_panel.align_var.set("center")
+            w = self.app_state.template_width or 800
+            h = self.app_state.template_height or 600
+            num_fields = len(self.app_state.fields)
+            for idx, f in enumerate(self.app_state.fields):
+                f.font_size = 48
+                f.text_color = "#000000"
+                f.alignment = "center"
+                f.auto_fit = False
+                f.text_x = w / 2.0
+                f.text_y = (
+                    (h * 0.4) + (idx * 60) if num_fields > 1 else h / 2.0
+                )
+            self.settings_panel.sync_controls_from_active_field()
             self.refresh_preview()
         elif action == "generate":
             self.start_generation()
@@ -228,77 +241,107 @@ class MainWindow(ctk.CTk):
                 self.app_state.template_width = img.width
                 self.app_state.template_height = img.height
 
-                # Set initial text position to center
-                self.app_state.text_x = img.width / 2
-                self.app_state.text_y = img.height / 2
+                # If fields exist, position them if they were at (0, 0)
+                if not self.app_state.fields:
+                    self.app_state.fields = [
+                        FieldConfig(
+                            column_name="Name",
+                            text_x=img.width / 2.0,
+                            text_y=img.height / 2.0,
+                        )
+                    ]
+                else:
+                    num_fields = len(self.app_state.fields)
+                    for idx, f in enumerate(self.app_state.fields):
+                        if f.text_x == 0.0 and f.text_y == 0.0:
+                            f.text_x = img.width / 2.0
+                            f.text_y = (
+                                (img.height * 0.4) + (idx * 60)
+                                if num_fields > 1
+                                else img.height / 2.0
+                            )
 
                 self.settings_panel.lbl_tpl_info.configure(
-                    text=f"{path.name}\n{img.width} x {img.height}"
+                    text=f"{path.name}\n{img.width} x {img.height} px"
                 )
+                self.settings_panel.update_fields_list()
                 self.refresh_preview(fit_first=True)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             messagebox.showerror(
                 "Error",
-                "Unable to open the selected image. Please choose a valid PNG/JPG image.",
+                f"Unable to open the selected image. Please choose a valid PNG/JPG image.\n{e}",
             )
 
     def load_csv(self, path: Path):
         try:
-            # We add a small spinner in the main window UI while loading large excel files?
-            # CustomTkinter doesn't have a built in spinner, we can use the root window title or just block.
             headers, raw_data = load_data(path)
             self.app_state.csv_path = path
             self.app_state.headers = headers
             self.app_state.raw_data = raw_data
 
-            self.settings_panel.col_dropdown.configure(state="normal", values=headers)
+            existing_fields = [
+                f for f in self.app_state.fields if f.column_name in headers
+            ]
+            w = self.app_state.template_width or 800
+            h = self.app_state.template_height or 600
 
-            # Select "Name" if exists, else first col
+            font_name = self.settings_panel.font_var.get() or "OpenSans-Regular"
+            font_path = resource_path("assets/fonts") / f"{font_name}.ttf"
+
+            if existing_fields:
+                self.app_state.fields = existing_fields
+            else:
+                # Add only the primary column (e.g., 'Name' or first header)
+                primary_col = (
+                    "Name" if "Name" in headers else (headers[0] if headers else "Field")
+                )
+                self.app_state.fields = [
+                    FieldConfig(
+                        column_name=primary_col,
+                        enabled=True,
+                        font_name=font_name,
+                        font_path=font_path if font_path.exists() else None,
+                        text_x=w / 2.0,
+                        text_y=h / 2.0,
+                    )
+                ]
+
+            self.app_state.active_field_index = 0
+
+            # Default filename column
             default_col = (
                 "Name" if "Name" in headers else (headers[0] if headers else "")
             )
-            self.settings_panel.col_var.set(default_col)
-            self.app_state.name_column = default_col
+            self.app_state.filename_column = default_col
 
-            self.update_names_from_column()
+            info = f"{path.name}\nRecords: {len(raw_data)} | Columns: {len(headers)}"
+            self.settings_panel.lbl_csv_info.configure(text=info)
+            self.settings_panel.update_fields_list()
+            self.refresh_preview()
 
         except DataError as e:
             messagebox.showerror("Error", str(e))
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Error", f"Unable to read the data file. {e}")
 
-    def update_names_from_column(self):
-        if not self.app_state.raw_data or not self.app_state.name_column:
-            return
-
-        try:
-            names, dups = extract_names(
-                self.app_state.raw_data, self.app_state.name_column
-            )
-            self.app_state.names = names
-
-            filename = (
-                self.app_state.csv_path.name if self.app_state.csv_path else "Data"
-            )
-            info = f"{filename}\nParticipants: {len(names)}"
-            if dups > 0:
-                info += f"\nNote: {dups} duplicate names found."
-            self.settings_panel.lbl_csv_info.configure(text=info)
-            self.refresh_preview()
-
-        except DataError as e:
-            messagebox.showerror("Error", str(e))
-            self.app_state.names = []
-            self.settings_panel.lbl_csv_info.configure(text="No valid names found.")
-            self.refresh_preview()
 
     def start_generation(self):
         if not self.app_state.template_path:
             messagebox.showerror("Error", "Please upload a certificate template.")
             return
-        if not self.app_state.csv_path or not self.app_state.names:
-            messagebox.showerror("Error", "Please upload a CSV file.")
+        if not self.app_state.raw_data and not self.app_state.names:
+            messagebox.showerror(
+                "Error", "Please upload a data file (CSV / Excel)."
+            )
             return
+
+        enabled_count = sum(1 for f in self.app_state.fields if f.enabled)
+        if enabled_count == 0 and not self.app_state.names:
+            messagebox.showerror(
+                "Error", "Please select at least one column to include on the certificate."
+            )
+            return
+
         if not self.app_state.output_folder:
             messagebox.showerror("Error", "Please select an output folder.")
             return
@@ -311,8 +354,9 @@ class MainWindow(ctk.CTk):
             )
             return
 
-        if len(self.app_state.names) > 5000 and not messagebox.askyesno(
-            "Warning", "You're about to generate 5000+ images. Continue?"
+        total_rows = len(self.app_state.raw_data) or len(self.app_state.names)
+        if total_rows > 5000 and not messagebox.askyesno(
+            "Warning", f"You're about to generate {total_rows} images. Continue?"
         ):
             return
 
@@ -370,7 +414,11 @@ class MainWindow(ctk.CTk):
                     self.gen_btn_cancel.configure(state="disabled")
                     return
                 elif msg["type"] == "done":
-                    c, f, t = msg["completed"], msg["failed"], len(self.app_state.names)
+                    c, f, t = (
+                        msg["completed"],
+                        msg["failed"],
+                        len(self.app_state.raw_data) or len(self.app_state.names),
+                    )
                     self.gen_lbl_status.configure(text="Generation Complete!")
                     self.gen_btn_cancel.configure(state="disabled")
 

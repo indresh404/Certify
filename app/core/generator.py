@@ -62,75 +62,121 @@ class GeneratorThread(Thread):
         self.cancel_event = cancel_event
 
     def run(self):
-        if (
-            not self.state.template_path
-            or not self.state.output_folder
-            or not self.state.names
-        ):
+        if not self.state.template_path or not self.state.output_folder:
             self.progress_queue.put(
                 {"type": "error", "message": "Missing required data for generation."}
             )
             return
 
+        rows = self.state.raw_data
+        if not rows and self.state.names:
+            col = self.state.filename_column or "Name"
+            rows = [{col: n} for n in self.state.names]
+
+        if not rows:
+            self.progress_queue.put(
+                {"type": "error", "message": "No participant data found for generation."}
+            )
+            return
+
+        # Determine enabled fields
+        enabled_fields = [f for f in self.state.fields if f.enabled]
+        if not enabled_fields:
+            fallback_field = self.state.active_field
+            if fallback_field is not None:
+                enabled_fields = [fallback_field]
+            else:
+                self.progress_queue.put(
+                    {
+                        "type": "error",
+                        "message": "No fields are selected to appear on the certificate.",
+                    }
+                )
+                return
+
         generated_files = set()
         completed = 0
         failed = 0
         errors = []
-        total = len(self.state.names)
+        total = len(rows)
 
-        # Calculate safe max width for auto-fit
-        safe_margin_px = self.state.template_width * self.state.safe_margin_pct
-        max_width = self.state.template_width - (2 * safe_margin_px)
-
-        font_path = str(self.state.font_path) if self.state.font_path else ""
-
-        for i, name in enumerate(self.state.names):
+        for i, row in enumerate(rows):
             if self.cancel_event.is_set():
                 self.progress_queue.put({"type": "cancelled"})
                 break
+
+            # Find a representative name for logs and filename
+            primary_col = self.state.filename_column
+            display_name = ""
+            if primary_col and primary_col in row and str(row[primary_col]).strip():
+                display_name = str(row[primary_col]).strip()
+            else:
+                for f in enabled_fields:
+                    val = str(row.get(f.column_name, "")).strip()
+                    if val:
+                        display_name = val
+                        break
+
+            if not display_name:
+                display_name = f"Certificate_{i+1}"
 
             try:
                 # 1. Re-open template
                 with Image.open(self.state.template_path) as img:
                     img.load()
-
                     draw = ImageDraw.Draw(img)
 
-                    # 2. Determine font size
-                    final_size = self.state.font_size
-                    if self.state.auto_fit and font_path:
-                        final_size = auto_fit_font_size(
-                            draw, name, font_path, self.state.font_size, max_width
+                    # 2. Draw all enabled fields
+                    for field_cfg in enabled_fields:
+                        text_val = str(row.get(field_cfg.column_name, "")).strip()
+                        if not text_val:
+                            continue
+
+                        font_path = (
+                            str(field_cfg.font_path) if field_cfg.font_path else ""
                         )
 
-                    # 3. Measure text and calculate position
-                    font = (
-                        ImageFont.truetype(font_path, final_size)
-                        if font_path
-                        else ImageFont.load_default()
-                    )
-                    anchor = get_text_anchor(self.state.alignment)
+                        # Determine font size (with auto-fit if configured)
+                        final_size = field_cfg.font_size
+                        if field_cfg.auto_fit and font_path:
+                            safe_margin_px = (
+                                self.state.template_width * field_cfg.safe_margin_pct
+                            )
+                            max_width = self.state.template_width - (
+                                2 * safe_margin_px
+                            )
+                            final_size = auto_fit_font_size(
+                                draw,
+                                text_val,
+                                font_path,
+                                field_cfg.font_size,
+                                max_width,
+                            )
 
-                    # 4. Draw text
-                    draw.text(
-                        (self.state.text_x, self.state.text_y),
-                        name,
-                        font=font,
-                        fill=self.state.text_color,
-                        anchor=anchor,
-                    )
+                        font = (
+                            ImageFont.truetype(font_path, final_size)
+                            if font_path
+                            else ImageFont.load_default()
+                        )
+                        anchor = get_text_anchor(field_cfg.alignment)
 
-                    # 5. Determine unique filename
-                    # Note: We fallback to row number if sanitize leaves it empty
-                    base_name = (
-                        name if sanitize_filename(name) else f"Certificate_{i+1}"
-                    )
+                        draw.text(
+                            (field_cfg.text_x, field_cfg.text_y),
+                            text_val,
+                            font=font,
+                            fill=field_cfg.text_color,
+                            anchor=anchor,
+                        )
+
+                    # 3. Determine unique filename
+                    base_name = sanitize_filename(display_name)
+                    if not base_name:
+                        base_name = f"Certificate_{i+1}"
                     output_path = get_unique_filename(
                         base_name, self.state.output_folder, generated_files
                     )
 
-                    # 6. Save image
-                    # Convert to RGB if saving as PNG and image has palette but no transparency (prevent issues)
+                    # 4. Save image
                     if img.mode == "P":
                         if "transparency" in img.info:
                             img = img.convert("RGBA")
@@ -142,7 +188,7 @@ class GeneratorThread(Thread):
 
             except Exception as e:  # noqa: BLE001
                 failed += 1
-                errors.append({"row": i + 1, "name": name, "error": str(e)})
+                errors.append({"row": i + 1, "name": display_name, "error": str(e)})
 
             # Report progress
             self.progress_queue.put(
@@ -151,10 +197,11 @@ class GeneratorThread(Thread):
                     "completed": completed,
                     "failed": failed,
                     "total": total,
-                    "current_name": name,
+                    "current_name": display_name,
                 }
             )
 
         self.progress_queue.put(
             {"type": "done", "completed": completed, "failed": failed, "errors": errors}
         )
+

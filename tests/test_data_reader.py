@@ -53,3 +53,18 @@ def test_load_names_duplicates(tmp_path):
     names, duplicates = extract_names(rows, "Name")
     assert names == ["Alice", "Bob", "Alice"]
     assert duplicates == 1
+
+
+def test_load_data_trailing_ghost_columns(tmp_path):
+    csv_file = tmp_path / "ghost.csv"
+    # 2 real columns and 5 trailing empty comma columns
+    csv_file.write_text(
+        "ID,Name,,,,,\n101,Alice,,,,,\n102,Bob,,,,,\n,,,,,\n",
+        encoding="utf-8",
+    )
+    headers, rows = load_data(csv_file)
+    assert headers == ["ID", "Name"]
+    assert len(rows) == 2
+    assert rows[0] == {"ID": "101", "Name": "Alice"}
+    assert rows[1] == {"ID": "102", "Name": "Bob"}
+

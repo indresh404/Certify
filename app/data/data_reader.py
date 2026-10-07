@@ -35,23 +35,66 @@ def _load_csv(csv_path: Path) -> tuple[list[str], list[dict[str, str]]]:
 
 
 def _parse_csv(file_obj) -> tuple[list[str], list[dict[str, str]]]:
-    reader = csv.reader(file_obj)
-    try:
-        headers = next(reader)
-    except StopIteration:
+    reader = list(csv.reader(file_obj))
+    if not reader:
         raise DataError("The file is empty.")
 
-    headers = [str(h).strip() for h in headers]
-    if not headers:
+    # Find header row (first non-empty row)
+    header_row = None
+    data_rows = []
+    for row in reader:
+        if not row or all(str(cell).strip() == "" for cell in row):
+            continue
+        if header_row is None:
+            header_row = row
+        else:
+            data_rows.append(row)
+
+    if header_row is None:
         raise DataError("No headers found in the file.")
 
+    col_count = len(header_row)
+    valid_col_indices = []
+    for col_idx in range(col_count):
+        h_str = header_row[col_idx].strip() if col_idx < len(header_row) else ""
+        has_data = any(
+            col_idx < len(r) and str(r[col_idx]).strip() != ""
+            for r in data_rows
+        )
+        if h_str or has_data:
+            valid_col_indices.append(col_idx)
+
+    if not valid_col_indices:
+        raise DataError("No valid columns found in the CSV file.")
+
+    headers = []
+    for col_idx in valid_col_indices:
+        h_str = header_row[col_idx].strip() if col_idx < len(header_row) else ""
+        if not h_str:
+            h_str = f"Column_{col_idx + 1}"
+        unique_h = h_str
+        counter = 2
+        while unique_h in headers:
+            unique_h = f"{h_str}_{counter}"
+            counter += 1
+        headers.append(unique_h)
+
     rows = []
-    for row in reader:
+    for r in data_rows:
+        if all(
+            col_idx >= len(r) or str(r[col_idx]).strip() == ""
+            for col_idx in valid_col_indices
+        ):
+            continue  # skip completely blank row
+
         row_dict = {}
-        for i, h in enumerate(headers):
-            val = row[i].strip() if i < len(row) else ""
+        for h, col_idx in zip(headers, valid_col_indices):
+            val = r[col_idx].strip() if col_idx < len(r) else ""
             row_dict[h] = val
         rows.append(row_dict)
+
+    if not rows:
+        raise DataError("No data records found in the file.")
 
     return headers, rows
 
@@ -63,30 +106,82 @@ def _load_excel(excel_path: Path) -> tuple[list[str], list[dict[str, str]]]:
         wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
         sheet = wb.active
 
-        headers = []
-        rows = []
-
-        for i, row in enumerate(sheet.iter_rows(values_only=True)):
-            if i == 0:
-                headers = [
-                    str(cell).strip() if cell is not None else f"Column_{j+1}"
-                    for j, cell in enumerate(row)
-                ]
-                if not headers:
-                    raise DataError("No headers found in the Excel file.")
-            else:
-                row_dict = {}
-                for j, h in enumerate(headers):
-                    val = (
-                        str(row[j]).strip()
-                        if j < len(row) and row[j] is not None
-                        else ""
-                    )
-                    row_dict[h] = val
-                rows.append(row_dict)
-
+        raw_rows = list(sheet.iter_rows(values_only=True))
         wb.close()
+
+        if not raw_rows:
+            raise DataError("The Excel file is empty.")
+
+        # Find header row (first non-empty row)
+        header_row = None
+        data_rows = []
+        for row in raw_rows:
+            if not row or all(
+                cell is None or str(cell).strip() == "" for cell in row
+            ):
+                continue
+            if header_row is None:
+                header_row = row
+            else:
+                data_rows.append(row)
+
+        if header_row is None:
+            raise DataError("No data found in the Excel file.")
+
+        col_count = len(header_row)
+        valid_col_indices = []
+        for col_idx in range(col_count):
+            h_val = header_row[col_idx]
+            h_str = str(h_val).strip() if h_val is not None else ""
+            has_data = any(
+                col_idx < len(r)
+                and r[col_idx] is not None
+                and str(r[col_idx]).strip() != ""
+                for r in data_rows
+            )
+            if h_str or has_data:
+                valid_col_indices.append(col_idx)
+
+        if not valid_col_indices:
+            raise DataError("No valid columns found in the Excel file.")
+
+        headers = []
+        for col_idx in valid_col_indices:
+            h_val = header_row[col_idx]
+            h_str = str(h_val).strip() if h_val is not None else ""
+            if not h_str:
+                h_str = f"Column_{col_idx + 1}"
+            unique_h = h_str
+            counter = 2
+            while unique_h in headers:
+                unique_h = f"{h_str}_{counter}"
+                counter += 1
+            headers.append(unique_h)
+
+        rows = []
+        for r in data_rows:
+            if all(
+                col_idx >= len(r)
+                or r[col_idx] is None
+                or str(r[col_idx]).strip() == ""
+                for col_idx in valid_col_indices
+            ):
+                continue  # skip completely blank row
+
+            row_dict = {}
+            for h, col_idx in zip(headers, valid_col_indices):
+                val = ""
+                if col_idx < len(r) and r[col_idx] is not None:
+                    val = str(r[col_idx]).strip()
+                row_dict[h] = val
+            rows.append(row_dict)
+
+        if not rows:
+            raise DataError("No data records found in the Excel file.")
+
         return headers, rows
+    except DataError:
+        raise
     except Exception as e:  # noqa: BLE001
         raise DataError(f"Unable to read the Excel file: {e!s}")
 
@@ -111,3 +206,4 @@ def extract_names(
         raise DataError(f"No participant names were found in column '{column_name}'.")
 
     return names, duplicates
+
